@@ -6,7 +6,7 @@
     </picture>
 </h1>
 
-The `dependabot` CLI is a tool for testing and debugging Dependabot update jobs.
+The `dependabot` CLI is a tool for running Dependabot update jobs.
 
 ## Installation
 
@@ -18,11 +18,7 @@ Use any of the following for a pain-free installation:
    ```
    The benefit of this method is that re-running the command will always update to the latest version.
 * You can download a pre-built binary from the [releases] page.
-* If you have the [`gh`][gh] command available, you can install the latest release
-   of `dependabot` using the following command ([gist source](https://gist.github.com/mattt/e09e1ecd76d5573e0517a7622009f06f)):
-   ```shell
-   gh gist view --raw e09e1ecd76d5573e0517a7622009f06f | bash
-   ```
+* On Mac, you can run `brew install dependabot`
 
 ## Requirements
 
@@ -43,13 +39,13 @@ Usage:
   dependabot [command]
 
 Examples:
-  $ dependabot update go_modules rsc/quote
+  $ dependabot update go_modules dependabot/cli
   $ dependabot test -f input.yml
 
 Available Commands:
   completion  Generate the autocompletion script for the specified shell
   help        Help about any command
-  test        Test scenarios
+  test        Run a smoke test
   update      Perform an update job
 
 Flags:
@@ -64,10 +60,11 @@ Use "dependabot [command] --help" for more information about a command.
 ### `dependabot update`
 
 Run the `update` subcommand to run a Dependabot update job for the provided ecosystem and repo.
-This does not create PRs, but outputs data that could be used to create PRs.
+This does not create PRs, but outputs data that could be used to create PRs. For an example of how to do that see
+the [example CLI usage](https://github.com/dependabot/example-cli-usage) repo.
 
 ```console
-$ dependabot update go_modules rsc/quote
+$ dependabot update go_modules dependabot/cli
 # ...
 +----------------------------------------------------+
 |        Changes to Dependabot Pull Requests         |
@@ -118,6 +115,8 @@ job:
     package-manager: npm_and_yarn
     allowed-updates:
       - update-type: all
+    dependencies: # required arg when `security-updates-only: true` set
+      - 'express'
     security-advisories:
       - dependency-name: express
         affected-versions:
@@ -151,9 +150,9 @@ with values from the environment.
 
 > **Note**
 >
-> The job description file format isn't documented publicly,
-> but you can find examples in the [`testdata` directory](testdata/)
-> and check out [the `Job` class in `dependabot-core`][dependabot-updater-job].
+> The job description file format isn't documented formally yet,
+> but you can find examples in the [smoke tests](https://github.com/dependabot/smoke-tests/tree/main/tests)
+> and look at the [model directory](/internal/model) for how the CLI models the job. 
 
 ### How it works
 
@@ -190,11 +189,11 @@ such as when evaluating manifest files or executing install scripts.
 ### `dependabot test`
 
 Run the `test` subcommand
-with a scenario file specified by the `--file` / `-f` option
+with a smoke test file specified by the `--file` / `-f` option
 to test the expected behavior for a Dependabot update job.
 
 ```console
-$ dependabot test -f scenario.yaml
+$ dependabot test -f smoke-test.yaml
 # ...
 +------------------------------------------+
 |   Changes to Dependabot Pull Requests    |
@@ -205,14 +204,12 @@ $ dependabot test -f scenario.yaml
 time="2022-09-28T08:15:26Z" level=info msg="15/15 calls cached (100%)"
 ```
 
-<a href="scenario-file"></a>
+### Smoke test
 
-### Scenario file
-
-A scenario file describes the input and expected output of a Dependabot job.
+A smoke test describes the input _and_ expected output of a Dependabot job.
 
 ```yaml
-# scenario.yaml
+# smoke-test.yaml
 input:
     job:
         package-manager: docker
@@ -250,7 +247,7 @@ output:
                 version: "22.04"
 ```
 
-This example scenario describes the expected behavior for Dependabot
+This example smoke test describes the expected behavior for Dependabot
 to update the base image of a Dockerfile from `ubuntu:17.04` to `ubuntu:22.04`.
 
 * The `input` field consists of a `job` and any `credentials`.
@@ -261,24 +258,24 @@ to update the base image of a Dockerfile from `ubuntu:17.04` to `ubuntu:22.04`.
 
 > **Note**
 >
-> The scenario file format isn't documented publicly,
+> The smoke test format isn't documented publicly,
 > but you can find examples in the [`smoke-tests` repo][smoke-tests]
 > and check [the `Job` class in `dependabot-core`][dependabot-updater-job].
 
 ### Producing a test
 
-To produce a scenario file that tests Dependabot behavior for a given repo,
+To produce a smoke test that tests Dependabot behavior for a given repo,
 run the `update` subcommand and set the `--output` / `-o` option to a file path.
 
 ```console
-dependabot update go_modules rsc/quote -o go-scenario.yml
+dependabot update go_modules dependabot/cli -o go-smoke-test.yml
 ```
 
-Run the `test` subcommand for the generated scenario file,
+Run the `test` subcommand for the generated smoke test,
 specifying a cache directory with the `--cache` option.
 
 ```console
-dependabot test -f go-scenario.yml --cache ./tmp/cache
+dependabot test -f go-smoke-test.yml --cache ./tmp/cache
 ```
 
 While performing the update job,
@@ -289,7 +286,7 @@ and you should see a line that looks like this at the bottom of the output:
 
 > time="2022-09-28T08:14:01Z" level=info msg="117/117 calls cached (100%)"
 
-When the cache coverage for a scenario is 100%,
+When the cache coverage for a smoke test is 100%,
 subsequent runs of the `test` subcommand
 are most likely to be fast and deterministic.
 Any cache misses indicate an external request made by the updater,
@@ -366,10 +363,9 @@ the issue, see <https://github.com/dependabot/cli/issues/113#issuecomment-161012
 
 ### `ensure_equivalent_gemfile_and_lockfile` error
 
-This error occurs when using `script/dependabot` and the Updater image is not in sync with dependabot-core. It can be resolved by rebuilding the Updater image. 
+This error occurs when using `script/dependabot` and the Updater image is not in sync with dependabot-core. It can be resolved by rebuilding the Updater image.
 
 For example, to rebuild the Updater image of the Go ecosystem, run this in the dependabot-core repository:
 ``` console
 $ script/build go_modules
 ```
-

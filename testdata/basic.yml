@@ -5,5 +5,11 @@ job:
       update-type: all
   source:
     provider: github
-    repo: rsc/quote
+    repo: dependabot/cli
     directory: /
+credentials:
+  - type: git_source
+    host: github.com
+    username: x-access-token
+    password: $LOCAL_GITHUB_ACCESS_TOKEN
+

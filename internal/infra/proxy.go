@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/goware/prefixer"
-	"github.com/moby/moby/client"
 	"github.com/moby/moby/pkg/namesgenerator"
 	"github.com/moby/moby/pkg/stdcopy"
 	"io"
@@ -80,6 +79,9 @@ func NewProxy(ctx context.Context, cli *client.Client, params *RunParams, nets *
 	config := &container.Config{
 		Image: params.ProxyImage,
 		Env: []string{
+			"HTTP_PROXY=" + os.Getenv("HTTP_PROXY"),
+			"HTTPS_PROXY=" + os.Getenv("HTTPS_PROXY"),
+			"NO_PROXY=" + os.Getenv("NO_PROXY"),
 			"JOB_ID=" + jobID,
 			"PROXY_CACHE=true",
 			"LOG_RESPONSE_BODY_ON_AUTH_FAILURE=true",
@@ -137,7 +139,7 @@ func NewProxy(ctx context.Context, cli *client.Client, params *RunParams, nets *
 }
 
 func putProxyConfig(ctx context.Context, cli *client.Client, config *Config, id string) error {
-	opt := types.CopyToContainerOptions{}
+	opt := container.CopyToContainerOptions{}
 
 	data, err := json.Marshal(config)
 	if err != nil {

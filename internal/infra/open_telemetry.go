@@ -3,15 +3,18 @@ package infra
 import (
 	"context"
 	"fmt"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/moby/moby/client"
+	"io"
 	"log"
 	"os"
 	"path"
 	"path/filepath"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+	"github.com/goware/prefixer"
+	"github.com/moby/moby/pkg/stdcopy"
 )
 
 // CollectorImageName is the default Docker image used
@@ -77,7 +80,7 @@ func NewCollector(ctx context.Context, cli *client.Client, net *Networks, params
 		containerID: collectorContainer.ID,
 	}
 
-	opt := types.CopyToContainerOptions{}
+	opt := container.CopyToContainerOptions{}
 	if t, err := tarball(sslCertificates, proxy.ca.Cert); err != nil {
 		return nil, fmt.Errorf("failed to create cert tarball: %w", err)
 	} else if err = cli.CopyToContainer(ctx, collector.containerID, "/", t, opt); err != nil {
@@ -101,7 +104,23 @@ func NewCollector(ctx context.Context, cli *client.Client, net *Networks, params
 	}
 
 	return collector, nil
+}
 
+func (c *Collector) TailLogs(ctx context.Context, cli *client.Client) {
+	out, err := cli.ContainerLogs(ctx, c.containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+	})
+	if err != nil {
+		return
+	}
+
+	r, w := io.Pipe()
+	go func() {
+		_, _ = io.Copy(os.Stderr, prefixer.New(r, "   otel | "))
+	}()
+	_, _ = stdcopy.StdCopy(w, w, out)
 }
 
 // Close stops and removes the container.

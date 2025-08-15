@@ -6,17 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/dependabot/cli/internal/model"
-	"github.com/dependabot/cli/internal/server"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/pkg/archive"
-	"github.com/hexops/gotextdiff"
-	"github.com/hexops/gotextdiff/myers"
-	"github.com/hexops/gotextdiff/span"
-	"github.com/moby/moby/api/types/registry"
-	"github.com/moby/moby/client"
-	"gopkg.in/yaml.v3"
 	"io"
 	"log"
 	"net/http"
@@ -26,6 +15,19 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+
+	"github.com/dependabot/cli/internal/model"
+	"github.com/dependabot/cli/internal/server"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/archive"
+	"github.com/hexops/gotextdiff"
+	"github.com/hexops/gotextdiff/myers"
+	"github.com/hexops/gotextdiff/span"
+	"github.com/moby/moby/api/types/registry"
+	"gopkg.in/yaml.v3"
 )
 
 type RunParams struct {
@@ -66,11 +68,15 @@ type RunParams struct {
 	CollectorImage string
 	// CollectorConfigPath is the path to the OpenTelemetry collector configuration file
 	CollectorConfigPath string
+	// StorageImage is the image to use for the storage service
+	StorageImage string
 	// Writer is where API calls will be written to
 	Writer    io.Writer
 	InputName string
 	InputRaw  []byte
 	ApiUrl    string
+	// UpdaterEnvironmentVariables are additional environment variables to set in the update container
+	UpdaterEnvironmentVariables []string
 }
 
 var gitShaRegex = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -133,7 +139,7 @@ func Run(params RunParams) error {
 	}
 
 	// run the containers, but don't return the error until AFTER the output is generated.
-	// this ensures that the output is always written in the scenario where there are multiple outputs,
+	// this ensures that the output is always written in the smoke test where there are multiple outputs,
 	// some that succeed and some that fail; we still want to see the output of the successful ones.
 	runContainersErr := runContainers(ctx, params)
 
@@ -249,11 +255,13 @@ func checkCredAccess(ctx context.Context, job *model.Job, creds []model.Credenti
 }
 
 var packageManagerLookup = map[string]string{
+	"bun":            "bun",
 	"bundler":        "bundler",
 	"cargo":          "cargo",
 	"composer":       "composer",
 	"pub":            "pub",
 	"docker":         "docker",
+	"docker_compose": "docker-compose",
 	"dotnet_sdk":     "dotnet-sdk",
 	"elm":            "elm",
 	"github_actions": "github-actions",
@@ -261,6 +269,7 @@ var packageManagerLookup = map[string]string{
 	"go_modules":     "gomod",
 	"gradle":         "gradle",
 	"maven":          "maven",
+	"helm":           "helm",
 	"hex":            "mix",
 	"nuget":          "nuget",
 	"npm_and_yarn":   "npm",
@@ -268,6 +277,9 @@ var packageManagerLookup = map[string]string{
 	"terraform":      "terraform",
 	"swift":          "swift",
 	"devcontainers":  "devcontainers",
+	"uv":             "uv",
+	"vcpkg":          "vcpkg",
+	"rust_toolchain": "rust-toolchain",
 }
 
 func setImageNames(params *RunParams) error {
@@ -312,7 +324,7 @@ func expandEnvironmentVariables(api *server.API, params *RunParams) {
 	}
 }
 
-func generateIgnoreConditions(params *RunParams, actual *model.Scenario) error {
+func generateIgnoreConditions(params *RunParams, actual *model.SmokeTest) error {
 	for _, out := range actual.Output {
 		if out.Type == "create_pull_request" {
 			createPR, ok := out.Expect.Data.(model.CreatePullRequest)
@@ -353,13 +365,20 @@ func runContainers(ctx context.Context, params RunParams) (err error) {
 		if params.CollectorConfigPath != "" {
 			err = pullImage(ctx, cli, params.CollectorImage)
 			if err != nil {
-				return err
+				fmt.Println("Failed to pull OpenTelemetry collector image:", err)
 			}
 		}
 
 		err = pullImage(ctx, cli, params.UpdaterImage)
 		if err != nil {
 			return err
+		}
+
+		if params.Job.UseCaseInsensitiveFileSystem() {
+			err = pullImage(ctx, cli, params.StorageImage)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -388,7 +407,10 @@ func runContainers(ctx context.Context, params RunParams) (err error) {
 	if params.CollectorConfigPath != "" {
 		collector, err = NewCollector(ctx, cli, networks, &params, prox)
 		if err != nil {
-			return err
+			fmt.Println("Failed to create OpenTelemetry collector:", err)
+		}
+		if !params.Debug {
+			go collector.TailLogs(ctx, cli)
 		}
 		defer collector.Close()
 	}
@@ -405,21 +427,32 @@ func runContainers(ctx context.Context, params RunParams) (err error) {
 
 	// put the clone dir in the updater container to be used by during the update
 	if params.LocalDir != "" {
-		if err = putCloneDir(ctx, cli, updater, params.LocalDir); err != nil {
+		containerDir := guestRepoDir
+		if params.Job.UseCaseInsensitiveFileSystem() {
+			// since the updater is using the storage container, we need to populate the repo on that device because that's the directory that will be used for the update
+			containerDir = caseSensitiveRepoContentsPath
+		}
+		if err = putCloneDir(ctx, cli, updater, params.LocalDir, containerDir); err != nil {
 			return err
 		}
 	}
 
 	if params.Debug {
-		if err := updater.RunShell(ctx, prox.url, params.ApiUrl); err != nil {
+		if err := updater.RunShell(ctx, prox.url, params.ApiUrl, params.Job, params.UpdaterEnvironmentVariables); err != nil {
 			return err
 		}
 	} else {
-		env := userEnv(prox.url, params.ApiUrl)
+		// First, update CA certificates as root
+		if err := updater.RunCmd(ctx, "update-ca-certificates", root); err != nil {
+			return err
+		}
+
+		// Then run the dependabot commands as the dependabot user
+		env := userEnv(prox.url, params.ApiUrl, params.Job, params.UpdaterEnvironmentVariables)
 		if params.Flamegraph {
 			env = append(env, "FLAMEGRAPH=1")
 		}
-		const cmd = "update-ca-certificates && bin/run fetch_files && bin/run update_files"
+		const cmd = "bin/run fetch_files && bin/run update_files"
 		if err := updater.RunCmd(ctx, cmd, dependabot, env...); err != nil {
 			return err
 		}
@@ -456,39 +489,39 @@ func getFromContainer(ctx context.Context, cli *client.Client, containerID, srcP
 	}
 }
 
-func putCloneDir(ctx context.Context, cli *client.Client, updater *Updater, dir string) error {
+func putCloneDir(ctx context.Context, cli *client.Client, updater *Updater, localDir, containerDir string) error {
 	// Docker won't create the directory, so we have to do it first.
-	const cmd = "mkdir -p " + guestRepoDir
+	cmd := fmt.Sprintf("mkdir -p %s", containerDir)
 	err := updater.RunCmd(ctx, cmd, dependabot)
 	if err != nil {
 		return fmt.Errorf("failed to create clone dir: %w", err)
 	}
 
-	r, err := archive.TarWithOptions(dir, &archive.TarOptions{})
+	r, err := archive.TarWithOptions(localDir, &archive.TarOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to tar clone dir: %w", err)
 	}
 
-	opt := types.CopyToContainerOptions{}
-	err = cli.CopyToContainer(ctx, updater.containerID, guestRepoDir, r, opt)
+	opt := container.CopyToContainerOptions{}
+	err = cli.CopyToContainer(ctx, updater.containerID, containerDir, r, opt)
 	if err != nil {
 		return fmt.Errorf("failed to copy clone dir to container: %w", err)
 	}
 
-	err = updater.RunCmd(ctx, "chown -R dependabot "+guestRepoDir, root)
+	err = updater.RunCmd(ctx, "chown -R dependabot "+containerDir, root)
 	if err != nil {
 		return fmt.Errorf("failed to initialize clone dir: %w", err)
 	}
 
 	// The directory needs to be a git repo, so we need to initialize it.
 	commands := []string{
-		"cd " + guestRepoDir,
+		"cd " + containerDir,
 		"git config --global init.defaultBranch main",
 		"git init",
 		"git config user.email 'dependabot@github.com'",
 		"git config user.name 'dependabot'",
 		"git add .",
-		"git commit --quiet -m 'initial commit'",
+		"git commit --quiet -m 'Dependabot CLI automated commit'",
 	}
 	err = updater.RunCmd(ctx, strings.Join(commands, " && "), dependabot)
 	if err != nil {
@@ -499,67 +532,112 @@ func putCloneDir(ctx context.Context, cli *client.Client, updater *Updater, dir 
 }
 
 func pullImage(ctx context.Context, cli *client.Client, imageName string) error {
-	var inspect types.ImageInspect
-
-	// check if image exists locally
 	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
-
-	// pull image if necessary
 	if err != nil {
-		var imagePullOptions image.PullOptions
-
-		if strings.HasPrefix(imageName, "ghcr.io/") {
-
-			token := os.Getenv("LOCAL_GITHUB_ACCESS_TOKEN")
-			if token != "" {
-				auth := base64.StdEncoding.EncodeToString([]byte("x:" + token))
-				imagePullOptions = image.PullOptions{
-					RegistryAuth: fmt.Sprintf("Basic %s", auth),
-				}
-			} else {
-				log.Println("Failed to find credentials for GitHub container registry.")
-			}
-		} else if strings.Contains(imageName, ".azurecr.io/") {
-			username := os.Getenv("AZURE_REGISTRY_USERNAME")
-			password := os.Getenv("AZURE_REGISTRY_PASSWORD")
-
-			registryName := strings.Split(imageName, "/")[0]
-
-			if username != "" && password != "" {
-				authConfig := registry.AuthConfig{
-					Username:      username,
-					Password:      password,
-					ServerAddress: registryName,
-				}
-
-				encodedJSON, _ := json.Marshal(authConfig)
-				authStr := base64.URLEncoding.EncodeToString(encodedJSON)
-
-				imagePullOptions = image.PullOptions{
-					RegistryAuth: authStr,
-				}
-			} else {
-				log.Println("Failed to find credentials for Azure container registry.")
-			}
-		} else {
-			log.Printf("Failed to find credentials for pulling image: %s\n.", imageName)
-		}
-
-		log.Printf("pulling image: %s\n", imageName)
-		out, err := cli.ImagePull(ctx, imageName, imagePullOptions)
+		// Image doesn't exist locally, pull it
+		err = pullImageWithAuth(ctx, cli, imageName)
 		if err != nil {
-			return fmt.Errorf("failed to pull %v: %w", imageName, err)
+			return fmt.Errorf("failed to pull image %v: %w", imageName, err)
 		}
-		_, _ = io.Copy(io.Discard, out)
-		out.Close()
 
 		inspect, _, err = cli.ImageInspectWithRaw(ctx, imageName)
 		if err != nil {
-			return fmt.Errorf("failed to inspect %v: %w", imageName, err)
+			return fmt.Errorf("failed to inspect image %v after pull: %w", imageName, err)
+		}
+	} else {
+		// Image doesn't exist remotely, don't bother pulling it
+		if inspect.RepoDigests == nil || len(inspect.RepoDigests) == 0 || inspect.RepoDigests[0] == "" {
+			return nil
+		}
+
+		client := NewRegistryClient(imageName)
+		exists, err := client.DigestExists(inspect.RepoDigests)
+		if err != nil {
+			log.Printf("failed to get digest for image %v: %v", imageName, err)
+			return nil
+		}
+
+		// If the digest doesn't exist remotely, don't bother pulling the image
+		if !exists {
+			log.Printf("digest %v for image %v does not exist remotely\n", inspect.ID, imageName)
+			return nil
+		}
+
+		latestDigest, err := client.GetLatestDigest(imageName)
+		if err != nil {
+			log.Printf("failed to get latest digest for image %v: %v", imageName, err)
+			return nil
+		}
+
+		isLatest := false
+		for _, digest := range inspect.RepoDigests {
+			if strings.HasSuffix(digest, latestDigest) {
+				isLatest = true
+				break
+			}
+		}
+
+		if !isLatest {
+			err = pullImageWithAuth(ctx, cli, imageName)
+			if err != nil {
+				return fmt.Errorf("image %v is outdated, failed to pull update: %w", imageName, err)
+			}
+		} else {
+			log.Printf("image %v is already up to date\n", imageName)
 		}
 	}
 
 	log.Printf("using image %v at %s\n", imageName, inspect.ID)
+	return nil
+}
+
+func pullImageWithAuth(ctx context.Context, cli *client.Client, imageName string) error {
+	var imagePullOptions image.PullOptions
+
+	if strings.HasPrefix(imageName, "ghcr.io/") {
+
+		token := os.Getenv("LOCAL_GITHUB_ACCESS_TOKEN")
+		if token != "" {
+			auth := base64.StdEncoding.EncodeToString([]byte("x:" + token))
+			imagePullOptions = image.PullOptions{
+				RegistryAuth: fmt.Sprintf("Basic %s", auth),
+			}
+		} else {
+			log.Println("Failed to find credentials for GitHub container registry.")
+		}
+	} else if strings.Contains(imageName, ".azurecr.io/") {
+		username := os.Getenv("AZURE_REGISTRY_USERNAME")
+		password := os.Getenv("AZURE_REGISTRY_PASSWORD")
+
+		registryName := strings.Split(imageName, "/")[0]
+
+		if username != "" && password != "" {
+			authConfig := registry.AuthConfig{
+				Username:      username,
+				Password:      password,
+				ServerAddress: registryName,
+			}
+
+			encodedJSON, _ := json.Marshal(authConfig)
+			authStr := base64.URLEncoding.EncodeToString(encodedJSON)
+
+			imagePullOptions = image.PullOptions{
+				RegistryAuth: authStr,
+			}
+		} else {
+			log.Println("Failed to find credentials for Azure container registry.")
+		}
+	} else {
+		log.Printf("Failed to find credentials for pulling image: %s\n.", imageName)
+	}
+
+	log.Printf("pulling image: %s\n", imageName)
+	out, err := cli.ImagePull(ctx, imageName, imagePullOptions)
+	if err != nil {
+		return fmt.Errorf("failed to pull %v: %w", imageName, err)
+	}
+	_, _ = io.Copy(io.Discard, out)
+	out.Close()
 
 	return nil
 }

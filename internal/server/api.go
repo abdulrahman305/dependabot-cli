@@ -28,8 +28,8 @@ type API struct {
 	Expectations []model.Output
 	// Errors is the error list populated by doing a Dependabot run
 	Errors []error
-	// Actual will contain the scenario output that actually happened after the run is Complete
-	Actual model.Scenario
+	// Actual will contain the smoke test output that actually happened after the run is Complete
+	Actual model.SmokeTest
 
 	server          *http.Server
 	cursor          int
@@ -121,9 +121,20 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	parts := strings.Split(r.URL.String(), "/")
 	kind := parts[len(parts)-1]
+
 	actual, err := decodeWrapper(kind, data)
 	if err != nil {
 		a.pushError(err)
+	}
+
+	a.outputRequestData(kind, actual)
+
+	if kind == "create_pull_request" && actual != nil {
+		createPR := actual.Data.(model.CreatePullRequest)
+		createPR.UpdatedDependencyFiles = replaceBinaryWithHash(createPR.UpdatedDependencyFiles)
+	} else if kind == "update_pull_request" && actual != nil {
+		updatePR := actual.Data.(model.UpdatePullRequest)
+		updatePR.UpdatedDependencyFiles = replaceBinaryWithHash(updatePR.UpdatedDependencyFiles)
 	}
 
 	if actual == nil {
@@ -134,7 +145,6 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if kind == "increment_metric" {
 		// Let's just output the metrics data and stop
-		a.outputRequestData(kind, actual)
 		return
 	}
 
@@ -144,7 +154,6 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !a.hasExpectations {
-		a.outputRequestData(kind, actual)
 		return
 	}
 
@@ -178,12 +187,12 @@ func (a *API) assertExpectation(kind string, actual *model.UpdateWrapper) {
 	}
 }
 
-func (a *API) outputRequestData(kind string, actual *model.UpdateWrapper) {
+func (a *API) outputRequestData(kind string, data *model.UpdateWrapper) {
 	if a.writer != nil {
 		// output the data received to stdout
 		if err := json.NewEncoder(a.writer).Encode(map[string]any{
 			"type": kind,
-			"data": actual.Data,
+			"data": data.Data,
 		}); err != nil {
 			// Fail so the user knows stdout is not working
 			log.Panicln("Failed to write to stdout: ", err)
@@ -220,21 +229,17 @@ func decodeWrapper(kind string, data []byte) (actual *model.UpdateWrapper, err e
 	case "update_dependency_list":
 		actual.Data, err = decode[model.UpdateDependencyList](data)
 	case "create_pull_request":
-		var createPR model.CreatePullRequest
-		createPR, err = decode[model.CreatePullRequest](data)
-		createPR.UpdatedDependencyFiles = replaceBinaryWithHash(createPR.UpdatedDependencyFiles)
-		actual.Data = createPR
+		actual.Data, err = decode[model.CreatePullRequest](data)
 	case "update_pull_request":
-		var updatePR model.UpdatePullRequest
-		updatePR, err = decode[model.UpdatePullRequest](data)
-		updatePR.UpdatedDependencyFiles = replaceBinaryWithHash(updatePR.UpdatedDependencyFiles)
-		actual.Data = updatePR
+		actual.Data, err = decode[model.UpdatePullRequest](data)
 	case "close_pull_request":
 		actual.Data, err = decode[model.ClosePullRequest](data)
 	case "mark_as_processed":
 		actual.Data, err = decode[model.MarkAsProcessed](data)
 	case "record_ecosystem_versions":
 		actual.Data, err = decode[model.RecordEcosystemVersions](data)
+	case "record_ecosystem_meta":
+		actual.Data, err = decode[[]model.RecordEcosystemMeta](data)
 	case "record_update_job_error":
 		actual.Data, err = decode[model.RecordUpdateJobError](data)
 	case "record_update_job_unknown_error":

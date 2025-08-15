@@ -12,18 +12,19 @@ import (
 )
 
 type SharedFlags struct {
-	file                string
-	cache               string
-	debugging           bool
-	flamegraph          bool
-	proxyCertPath       string
-	collectorConfigPath string
-	extraHosts          []string
-	output              string
-	pullImages          bool
-	volumes             []string
-	timeout             time.Duration
-	local               string
+	file                        string
+	cache                       string
+	debugging                   bool
+	flamegraph                  bool
+	proxyCertPath               string
+	collectorConfigPath         string
+	extraHosts                  []string
+	output                      string
+	pullImages                  bool
+	volumes                     []string
+	timeout                     time.Duration
+	local                       string
+	updaterEnvironmentVariables []string
 }
 
 // root flags
@@ -31,6 +32,7 @@ var (
 	updaterImage   string
 	proxyImage     string
 	collectorImage string
+	storageImage   string
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -39,7 +41,7 @@ var rootCmd = &cobra.Command{
 	Short: "Dependabot end-to-end runner",
 	Long:  `Run Dependabot jobs from the command line.`,
 	Example: heredoc.Doc(`
-        $ dependabot update go_modules rsc/quote
+        $ dependabot update go_modules dependabot/cli
         $ dependabot test -f input.yml
 	`),
 	Version: Version(),
@@ -59,4 +61,5 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&updaterImage, "updater-image", "", "container image to use for the updater")
 	rootCmd.PersistentFlags().StringVar(&proxyImage, "proxy-image", infra.ProxyImageName, "container image to use for the proxy")
 	rootCmd.PersistentFlags().StringVar(&collectorImage, "collector-image", infra.CollectorImageName, "container image to use for the OpenTelemetry collector")
+	rootCmd.PersistentFlags().StringVar(&storageImage, "storage-image", infra.StorageImageName, "container image to use for the storage service")
 }
