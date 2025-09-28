@@ -28,6 +28,7 @@ reasons.
 
 // Job is the data that is passed to the updater.
 type Job struct {
+	Command                    string            `json:"command" yaml:"command,omitempty"`
 	PackageManager             string            `json:"package-manager" yaml:"package-manager"`
 	AllowedUpdates             []Allowed         `json:"allowed-updates" yaml:"allowed-updates,omitempty"`
 	Debug                      bool              `json:"debug" yaml:"debug,omitempty"`
@@ -53,6 +54,7 @@ type Job struct {
 	MaxUpdaterRunTime          int               `json:"max-updater-run-time" yaml:"max-updater-run-time,omitempty"`
 	UpdateCooldown             *UpdateCooldown   `json:"cooldown,omitempty" yaml:"cooldown,omitempty"`
 	ExcludePaths               []string          `json:"exclude-paths" yaml:"exclude-paths,omitempty"`
+	MultiEcosystemUpdate       bool              `json:"multi-ecosystem-update" yaml:"multi-ecosystem-update,omitempty"`
 }
 
 func (j *Job) UseCaseInsensitiveFileSystem() bool {
@@ -80,6 +82,7 @@ type ExistingPR struct {
 	DependencyName    string  `json:"dependency-name" yaml:"dependency-name"`
 	DependencyVersion string  `json:"dependency-version" yaml:"dependency-version"`
 	Directory         *string `json:"directory,omitempty" yaml:"directory,omitempty"`
+	PRNumber          *int    `json:"pr-number,omitempty" yaml:"pr-number,omitempty"`
 }
 
 type ExistingGroupPR struct {
